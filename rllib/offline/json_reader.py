@@ -283,7 +283,7 @@ class JsonReader(InputReader):
                 policy = next(iter(self.ioctx.worker.policy_map.values()))
                 json_data = self._adjust_obs_actions_for_policy(
                     json_data, policy)
-            return SampleBatch(json_data)
+            batch = SampleBatch(json_data)
         elif data_type == "MultiAgentBatch":
             policy_batches = {}
             for policy_id, policy_batch in json_data["policy_batches"].items():
@@ -294,12 +294,25 @@ class JsonReader(InputReader):
                     policy = self.ioctx.worker.policy_map[policy_id]
                     inner = self._adjust_obs_actions_for_policy(inner, policy)
                 policy_batches[policy_id] = SampleBatch(inner)
-            return MultiAgentBatch(policy_batches, json_data["count"])
+            batch = MultiAgentBatch(policy_batches, json_data["count"])
         else:
             raise ValueError(
                 "Type field must be one of ['SampleBatch', 'MultiAgentBatch']",
                 data_type)
 
+        # Adjust the seq-lens array depending on the incoming agent sequences.
+        if self.default_policy.is_recurrent():
+            # Add seq_lens & max_seq_len to batch
+            seq_lens = []
+            max_seq_len = self.default_policy.config["model"]["max_seq_len"]
+            count = batch.count
+            while count > 0:
+                seq_lens.append(min(count, max_seq_len))
+                count -= max_seq_len
+            batch[SampleBatch.SEQ_LENS] = np.array(seq_lens)
+            batch.max_seq_len = max_seq_len
+        print('json batch keys ',batch.keys())
+        return batch
     def _adjust_obs_actions_for_policy(self, json_data: dict,
                                        policy: Policy) -> dict:
         """Handle nested action/observation spaces for policies.

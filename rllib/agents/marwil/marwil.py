@@ -3,13 +3,12 @@ from typing import Type
 from ray.rllib.agents.trainer import Trainer, with_common_config
 from ray.rllib.agents.marwil.marwil_tf_policy import MARWILTFPolicy
 from ray.rllib.evaluation.worker_set import WorkerSet
-from ray.rllib.execution.buffers.multi_agent_replay_buffer import \
-    MultiAgentReplayBuffer
+from ray.rllib.execution.buffers.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from ray.rllib.execution.concurrency_ops import Concurrently
 from ray.rllib.execution.metric_ops import StandardMetricsReporting
 from ray.rllib.execution.replay_ops import Replay, StoreToReplayBuffer
 from ray.rllib.execution.rollout_ops import ParallelRollouts, ConcatBatches
-from ray.rllib.execution.train_ops import TrainOneStep
+from ray.rllib.execution.train_ops import TrainOneStep, MultiGPUTrainOneStep
 from ray.rllib.policy.policy import Policy
 from ray.rllib.utils.annotations import override
 from ray.rllib.utils.typing import TrainerConfigDict
@@ -30,6 +29,13 @@ DEFAULT_CONFIG = with_common_config({
     "input": "sampler",
     # Use importance sampling estimators for reward.
     "input_evaluation": ["is", "wis"],
+
+    # === Replay buffer ===
+    # Set automatically: The number of contiguous environment steps to
+    # replay at once. Will be calculated via
+    # model->max_seq_len 
+    # Do not set this to any valid value!
+    "replay_sequence_length": -1,
 
     # === Postprocessing/accum., discounted return calculation ===
     # If true, use the Generalized Advantage Estimator (GAE)
@@ -115,11 +121,22 @@ class MARWILTrainer(Trainer):
             learning_starts=config["learning_starts"],
             capacity=config["replay_buffer_size"],
             replay_batch_size=config["train_batch_size"],
-            replay_sequence_length=1,
+            replay_sequence_length=config["replay_sequence_length"],
         )
 
         store_op = rollouts \
             .for_each(StoreToReplayBuffer(local_buffer=replay_buffer))
+
+        if config["simple_optimizer"]:
+            train_step_op = TrainOneStep(workers)
+        else:
+            train_step_op = MultiGPUTrainOneStep(
+                workers=workers,
+                sgd_minibatch_size=config["train_batch_size"],
+                num_sgd_iter=1,
+                num_gpus=config["num_gpus"],
+                _fake_gpus=config["_fake_gpus"],
+            )
 
         replay_op = Replay(local_buffer=replay_buffer) \
             .combine(
@@ -127,9 +144,11 @@ class MARWILTrainer(Trainer):
                 min_batch_size=config["train_batch_size"],
                 count_steps_by=config["multiagent"]["count_steps_by"],
             )) \
-            .for_each(TrainOneStep(workers))
+            .for_each(train_step_op)
+
 
         train_op = Concurrently(
-            [store_op, replay_op], mode="round_robin", output_indexes=[1])
+            [store_op, replay_op], mode="round_robin", output_indexes=[1]
+        )
 
         return StandardMetricsReporting(train_op, workers, config)
