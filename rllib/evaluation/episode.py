@@ -62,6 +62,7 @@ class Episode:
             env_id: EnvID,
             *,
             worker: Optional["RolloutWorker"] = None,
+            episode_id: Optional[int] = None,
     ):
         """Initializes an Episode instance.
 
@@ -75,6 +76,7 @@ class Episode:
             extra_batch_callback:
             env_id: The environment's ID in which this episode runs.
             worker: The RolloutWorker instance, in which this episode runs.
+            episode_id: The episode id (to be used with offline learning).
         """
         self.new_batch_builder: Callable[
             [], "MultiAgentSampleBatchBuilder"] = batch_builder_factory
@@ -84,7 +86,9 @@ class Episode:
             batch_builder_factory()
         self.total_reward: float = 0.0
         self.length: int = 0
-        self.episode_id: int = random.randrange(2e9)
+        self.episode_id: int = episode_id
+        if self.episode_id is None:
+            self.episode_id = random.randrange(2e9)
         self.env_id = env_id
         self.worker = worker
         self.agent_rewards: Dict[AgentID, float] = defaultdict(float)

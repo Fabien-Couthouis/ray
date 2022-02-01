@@ -1,3 +1,4 @@
+from collections import defaultdict
 import glob
 import json
 import logging
@@ -11,6 +12,9 @@ import tree  # pip install dm_tree
 from typing import Dict, List, Optional, Tuple, Union
 from urllib.parse import urlparse
 import zipfile
+
+
+from ray.rllib.utils.typing import EnvObsType
 
 
 
@@ -30,9 +34,12 @@ from ray.rllib.utils.compression import unpack_if_needed
 from ray.rllib.evaluation.collectors.simple_list_collector import _AgentCollector
 from ray.rllib.evaluation.episode import Episode
 from ray.rllib.utils.spaces.space_utils import clip_action, get_dummy_batch_for_space, normalize_action
-
+from ray.rllib.evaluation.collectors.simple_list_collector import \
+    SimpleListCollector
 from ray.rllib.utils.typing import  AgentID, EpisodeID, EnvID, PolicyID, TensorType, FileType, SampleBatchType
-
+from ray.rllib.evaluation.sample_batch_builder import \
+    MultiAgentSampleBatchBuilder
+from ray.rllib.env.base_env import  convert_to_base_env
 
 logger = logging.getLogger(__name__)
 
@@ -62,14 +69,26 @@ class JsonReader(InputReader):
         self.ioctx = ioctx or IOContext()
         self.default_policy = self.policy_map = None
         if self.ioctx.worker is not None:
+            from ray.rllib.evaluation.sampler import NewEpisodeDefaultDict
+
             self.policy_map = self.ioctx.worker.policy_map
             self.default_policy = self.policy_map.get(DEFAULT_POLICY_ID)
             # Whenever we observe a new episode+agent, add a new
             # _SingleTrajectoryCollector.
-            self.agent_collectors: Dict[Tuple[EpisodeID, AgentID],
-                                    _AgentCollector] = {}
 
-            self._active_episode = None
+            config =  self.ioctx.config
+            self.sample_collector = SimpleListCollector(
+                policy_map=self.policy_map,
+                clip_rewards= config["clip_rewards"],
+                callbacks =config["callbacks"] ,
+                multiple_episodes_in_batch=config["batch_mode"]=="truncate_episodes",
+                rollout_fragment_length=config["rollout_fragment_length"],
+                count_steps_by=config["multiagent"]["count_steps_by"],
+            )
+
+
+            self._active_episodes : Dict[EnvID, Episode] = NewEpisodeDefaultDict(self.new_episode)
+
         if isinstance(inputs, str):
             inputs = os.path.abspath(os.path.expanduser(inputs))
             if os.path.isdir(inputs):
@@ -117,6 +136,8 @@ class JsonReader(InputReader):
         # TODO: determine exact shift-before based on the view-req shifts.
         self.agent_collectors[agent_key] = _AgentCollector(
             policy.view_requirements, policy)
+
+        
         self.agent_collectors[agent_key].add_init_obs(
             episode_id=episode_id,
             agent_index=agent_index,
@@ -124,19 +145,90 @@ class JsonReader(InputReader):
             t=t,
             init_obs=init_obs)
 
-    def collect_batch(self, batch: SampleBatch):
-        for sub_batch in batch.rows():
-            agent_key = sub_batch[SampleBatch.AGENT_INDEX]
-            eps_id = sub_batch[SampleBatch.EPS_ID]
-            if eps_id != self._cur_eps_id:
-                self.add_init_obs(sub_batch, eps_id, agent_key)
-                self._cur_eps_id = eps_id
-            else:
-                # Remove last obs
-                del sub_batch[SampleBatch.OBS]
-                self.agent_collectors[agent_key].add_action_reward_next_obs(sub_batch)
+    def new_episode(self, episode_id):
+        worker = self.ioctx.worker
+        # Pool of batch builders, which can be shared across episodes to pack
+        # trajectory data.
+        batch_builder_pool: List[MultiAgentSampleBatchBuilder] = []
 
-            self.add_rnn_states(sub_batch)
+        def get_batch_builder():
+            if batch_builder_pool:
+                return batch_builder_pool.pop()
+            else:
+                return None
+        extra_batch_callback = lambda x: None
+        env_id=0
+        episode = Episode(
+            worker.policy_map,
+            worker.policy_mapping_fn,
+            get_batch_builder,
+            extra_batch_callback,
+            env_id=env_id,
+            worker=worker,
+            episode_id=episode_id,
+        )
+        return episode
+    def collect_batch(self, batch: SampleBatch):
+        print('batch obs',batch[SampleBatch.OBS])
+        for sub_batch in batch.rows():
+            #TODO: change this?
+            agent_id = sub_batch[SampleBatch.AGENT_INDEX]
+            eps_id = sub_batch[SampleBatch.EPS_ID]
+
+            is_new_episode: bool = eps_id not in self._active_episodes
+            episode: Episode = self._active_episodes[eps_id]
+
+            if not is_new_episode:
+                episode._add_agent_rewards({agent_id:sub_batch[SampleBatch.REWARDS]})
+            
+            agent_done = sub_batch[SampleBatch.DONES]
+            last_observation: EnvObsType = episode.last_observation_for(
+                agent_id)
+            policy_id: PolicyID = episode.policy_for(agent_id)
+
+            # A new agent (initial obs) is already done -> Skip entirely.
+            if last_observation is None and agent_done:
+                continue
+
+            agent_id  = sub_batch[SampleBatch.AGENT_INDEX]
+            #TODO: is this new_obs?
+            filtered_obs = sub_batch[SampleBatch.OBS]
+            raw_obs = sub_batch[SampleBatch.OBS]
+            episode._set_last_observation(agent_id, filtered_obs)
+            episode._set_last_raw_obs(agent_id, raw_obs)
+            episode._set_last_done(agent_id, agent_done)
+            episode._set_last_info(agent_id, sub_batch[SampleBatch.INFOS])
+
+            
+            # Record transition info if applicable.
+            if last_observation is None:
+                self.sample_collector.add_init_obs(episode, agent_id, episode.env_id,
+                                              policy_id, episode.length - 1,
+                                              filtered_obs)
+            else:
+                del sub_batch[SampleBatch.OBS]
+                self.sample_collector.add_action_reward_next_obs(
+                    episode.episode_id, agent_id, episode.env_id, policy_id,
+                    agent_done, sub_batch)
+
+            # if all_agents_done:
+            #     ma_sample_batch = sample_collector.postprocess_episode(
+            #     episode,
+            #     is_done=is_done or (hit_horizon and not soft_horizon),
+            #     check_dones=check_dones,
+            #     build=not multiple_episodes_in_batch)
+            input_dict = self.sample_collector.get_inference_input_dict(policy_id)
+            print('INFERENCE INPUT DICT',input_dict)
+            print('state_in_0: ', input_dict['state_in_0'])
+
+            # fill sub_batch with missing rnn states
+            states = defaultdict(list)
+            for key, value in input_dict.items():
+                if key not in sub_batch:
+                    states[key].append(value)
+        
+        for state_key, state_value in states.items():
+            batch[state_key] = np.concatenate(state_value, axis=-1)
 
     def add_rnn_states(self, sub_batch: Dict):
         policy = self.default_policy
@@ -269,7 +361,13 @@ class JsonReader(InputReader):
         if not self.ioctx.config.get("postprocess_inputs"):
             return batch
 
-        # self.collect_batch(batch)
+        # RNN case without states in json file
+        if "state_in_0" in self.default_policy.view_requirements:
+            # No state in data
+            if "state_in_0" not in batch.keys():
+                self.collect_batch(batch)
+                print('new batch after',batch)
+
         if isinstance(batch, SampleBatch):
             out = []
             for sub_batch in batch.split_by_episode():

@@ -61,6 +61,8 @@ def test_ppo_rnn(self=None):
             check_train_results(results)
 
             eval_results = results.get("evaluation")
+            # print("results", results)
+
             if eval_results:
                 print("iter={} R={} ".format(i, eval_results["episode_reward_mean"]))
                 # Learn until some reward is reached on an actual live env.

@@ -31,11 +31,13 @@ torch, _ = try_import_torch()
 
 
 def test_marwil_rnn(self=None):
-    ModelCatalog.register_custom_model("rnn", TorchRNNModel)
+    ModelCatalog.register_custom_model("rnn", RNNModel)
     # The path may change depending on the location of this file (works for rllib.agents.marwil.tests)
     rllib_dir = Path(__file__).parent.parent.parent.parent
     print("rllib dir={}".format(rllib_dir))
     data_file = os.path.join(rllib_dir, "tests/data/cartpole/small.json")
+    # data_file = os.path.join(rllib_dir, r"C:\Users\fcouthouis2\Documents\dev\outputs\output-2022-02-01_12-51-47_worker-1_2.json")
+
     print("data_file={} exists={}".format(data_file, os.path.isfile(data_file)))
 
     config = marwil.DEFAULT_CONFIG.copy()
@@ -53,7 +55,7 @@ def test_marwil_rnn(self=None):
     num_iterations = 10
     min_reward = 70.0
 
-    frameworks = "torch"
+    frameworks = "tf"
     for _ in framework_iterator(config, frameworks=frameworks):
         trainer = marwil.MARWILTrainer(config=config, env="CartPole-v0")
         learnt = False
@@ -62,6 +64,7 @@ def test_marwil_rnn(self=None):
             check_train_results(results)
 
             eval_results = results.get("evaluation")
+            print("eval results", eval_results)
             if eval_results:
                 print("iter={} R={} ".format(i, eval_results["episode_reward_mean"]))
                 # Learn until some reward is reached on an actual live env.
