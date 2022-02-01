@@ -9,7 +9,7 @@ from ray.rllib.agents.ppo import PPOTrainer
 from ray.rllib.evaluation.postprocessing import compute_advantages
 from ray.rllib.examples.env.debug_counter_env import DebugCounterEnv
 from ray.rllib.examples.models.rnn_spy_model import RNNSpyModel
-from ray.rllib.examples.models.rnn_model import RNNModel
+from ray.rllib.examples.models.rnn_model import RNNModel, TorchRNNModel
 from ray.rllib.models import ModelCatalog
 from ray.rllib.offline import JsonReader
 from ray.rllib.policy.rnn_sequencing import chop_into_sequences
@@ -31,7 +31,7 @@ torch, _ = try_import_torch()
 
 
 def test_marwil_rnn(self=None):
-    ModelCatalog.register_custom_model("rnn", RNNModel)
+    ModelCatalog.register_custom_model("rnn", TorchRNNModel)
     # The path may change depending on the location of this file (works for rllib.agents.marwil.tests)
     rllib_dir = Path(__file__).parent.parent.parent.parent
     print("rllib dir={}".format(rllib_dir))
@@ -47,13 +47,13 @@ def test_marwil_rnn(self=None):
     config["model"] = {
         "custom_model": "rnn",
     }
-    config["input_evaluation"] = [] #["is", "wis"]
+    config["input_evaluation"] = ["is", "wis"]
     # Learn from offline data.
     config["input"] = [data_file]
     num_iterations = 10
     min_reward = 70.0
 
-    frameworks = "tf"
+    frameworks = "torch"
     for _ in framework_iterator(config, frameworks=frameworks):
         trainer = marwil.MARWILTrainer(config=config, env="CartPole-v0")
         learnt = False

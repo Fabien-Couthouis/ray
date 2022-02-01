@@ -1,15 +1,19 @@
 import glob
 import json
 import logging
+from gym import Space
 import numpy as np
 import os
 from pathlib import Path
 import random
 import re
 import tree  # pip install dm_tree
-from typing import List, Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 from urllib.parse import urlparse
 import zipfile
+
+
+
 
 try:
     from smart_open import smart_open
@@ -23,8 +27,12 @@ from ray.rllib.policy.sample_batch import DEFAULT_POLICY_ID, MultiAgentBatch, \
     SampleBatch
 from ray.rllib.utils.annotations import override, PublicAPI
 from ray.rllib.utils.compression import unpack_if_needed
-from ray.rllib.utils.spaces.space_utils import clip_action, normalize_action
-from ray.rllib.utils.typing import FileType, SampleBatchType
+from ray.rllib.evaluation.collectors.simple_list_collector import _AgentCollector
+from ray.rllib.evaluation.episode import Episode
+from ray.rllib.utils.spaces.space_utils import clip_action, get_dummy_batch_for_space, normalize_action
+
+from ray.rllib.utils.typing import  AgentID, EpisodeID, EnvID, PolicyID, TensorType, FileType, SampleBatchType
+
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +64,12 @@ class JsonReader(InputReader):
         if self.ioctx.worker is not None:
             self.policy_map = self.ioctx.worker.policy_map
             self.default_policy = self.policy_map.get(DEFAULT_POLICY_ID)
+            # Whenever we observe a new episode+agent, add a new
+            # _SingleTrajectoryCollector.
+            self.agent_collectors: Dict[Tuple[EpisodeID, AgentID],
+                                    _AgentCollector] = {}
 
+            self._active_episode = None
         if isinstance(inputs, str):
             inputs = os.path.abspath(os.path.expanduser(inputs))
             if os.path.isdir(inputs):
@@ -89,10 +102,135 @@ class JsonReader(InputReader):
         else:
             raise ValueError("No files found matching {}".format(inputs))
         self.cur_file = None
+        self._cur_eps_id = None
+
+    def add_init_obs(self, sub_batch: Dict, episode_id:int, agent_key, env_id=0) -> None:
+        #TODO (fcouthouis): handle multipolicy
+        policy = self.default_policy
+        agent_index = sub_batch[SampleBatch.AGENT_INDEX]
+        agent_key = agent_index
+        t = sub_batch[SampleBatch.T]
+        init_obs = sub_batch[SampleBatch.OBS]
+
+        # Add initial obs to Trajectory.
+        assert agent_key not in self.agent_collectors
+        # TODO: determine exact shift-before based on the view-req shifts.
+        self.agent_collectors[agent_key] = _AgentCollector(
+            policy.view_requirements, policy)
+        self.agent_collectors[agent_key].add_init_obs(
+            episode_id=episode_id,
+            agent_index=agent_index,
+            env_id=env_id,
+            t=t,
+            init_obs=init_obs)
+
+    def collect_batch(self, batch: SampleBatch):
+        for sub_batch in batch.rows():
+            agent_key = sub_batch[SampleBatch.AGENT_INDEX]
+            eps_id = sub_batch[SampleBatch.EPS_ID]
+            if eps_id != self._cur_eps_id:
+                self.add_init_obs(sub_batch, eps_id, agent_key)
+                self._cur_eps_id = eps_id
+            else:
+                # Remove last obs
+                del sub_batch[SampleBatch.OBS]
+                self.agent_collectors[agent_key].add_action_reward_next_obs(sub_batch)
+
+            self.add_rnn_states(sub_batch)
+
+    def add_rnn_states(self, sub_batch: Dict):
+        policy = self.default_policy
+        keys = [0]
+
+        buffers = {}
+        for k in keys:
+            collector = self.agent_collectors[k]
+            buffers[k] = collector.buffers
+        # Use one agent's buffer_structs (they should all be the same).
+        buffer_structs = self.agent_collectors[keys[0]].buffer_structs
+
+        input_dict = {}
+        for view_col, view_req in policy.view_requirements.items():
+            # Not used for action computations.
+            if not view_req.used_for_compute_actions:
+                continue
+
+            # Create the batch of data from the different buffers.
+            data_col = view_req.data_col or view_col
+            delta = -1 if data_col in [
+                SampleBatch.OBS, SampleBatch.ENV_ID, SampleBatch.EPS_ID,
+                SampleBatch.AGENT_INDEX, SampleBatch.T
+            ] else 0
+            # Range of shifts, e.g. "-100:0". Note: This includes index 0!
+            if view_req.shift_from is not None:
+                time_indices = (view_req.shift_from + delta,
+                                view_req.shift_to + delta)
+            # Single shift (e.g. -1) or list of shifts, e.g. [-4, -1, 0].
+            else:
+                time_indices = view_req.shift + delta
+
+            # Loop through agents and add up their data (batch).
+            data = None
+            for k in keys:
+                # Buffer for the data does not exist yet: Create dummy
+                # (zero) data.
+                if data_col not in buffers[k]:
+                    if view_req.data_col is not None:
+                        space = policy.view_requirements[
+                            view_req.data_col].space
+                    else:
+                        space = view_req.space
+
+                    if isinstance(space, Space):
+                        fill_value = get_dummy_batch_for_space(
+                            space,
+                            batch_size=0,
+                        )
+                    else:
+                        fill_value = space
+
+                    self.agent_collectors[k]._build_buffers({
+                        data_col: fill_value
+                    })
+                    print('NOT IN data_col,',data_col)
+
+                print('data_col,',data_col, 'data:',data)
+                if data is None:
+                    data = [[] for _ in range(len(buffers[keys[0]][data_col]))]
+
+                # `shift_from` and `shift_to` are defined: User wants a
+                # view with some time-range.
+                if isinstance(time_indices, tuple):
+                    # `shift_to` == -1: Until the end (including(!) the
+                    # last item).
+                    if time_indices[1] == -1:
+                        for d, b in zip(data, buffers[k][data_col]):
+                            d.append(b[time_indices[0]:])
+                    # `shift_to` != -1: "Normal" range.
+                    else:
+                        for d, b in zip(data, buffers[k][data_col]):
+                            d.append(b[time_indices[0]:time_indices[1] + 1])
+                # Single index.
+                else:
+                    for d, b in zip(data, buffers[k][data_col]):
+                        d.append(b[time_indices])
+            print(data_col, "data",type(data),data)
+            np_data = [np.array(d) for d in data]
+            if data_col in buffer_structs:
+                input_dict[view_col] = tree.unflatten_as(
+                    buffer_structs[data_col], np_data)
+            else:
+                input_dict[view_col] = np_data[0]
+        print("**input_dict",input_dict)
+        for key,value in input_dict.items():
+            if key not in sub_batch:
+                sub_batch[key] = value
+        print("**sub_batch",sub_batch)
 
     @override(InputReader)
     def next(self) -> SampleBatchType:
-        batch = self._try_parse(self._next_line())
+        batch = self._try_parse(self._next_line())    
+
         tries = 0
         while not batch and tries < 100:
             tries += 1
@@ -127,9 +265,11 @@ class JsonReader(InputReader):
 
     def _postprocess_if_needed(self,
                                batch: SampleBatchType) -> SampleBatchType:
+        
         if not self.ioctx.config.get("postprocess_inputs"):
             return batch
 
+        # self.collect_batch(batch)
         if isinstance(batch, SampleBatch):
             out = []
             for sub_batch in batch.split_by_episode():
@@ -284,6 +424,7 @@ class JsonReader(InputReader):
                 json_data = self._adjust_obs_actions_for_policy(
                     json_data, policy)
             batch = SampleBatch(json_data)
+            print('SampleBatchJson',batch)
         elif data_type == "MultiAgentBatch":
             policy_batches = {}
             for policy_id, policy_batch in json_data["policy_batches"].items():

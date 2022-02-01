@@ -1134,17 +1134,19 @@ class TFPolicy(Policy):
         # Build the feed dict from the batch.
         feed_dict = {}
         for key, placeholders in self._loss_input_dict.items():
-            tree.map_structure(
-                lambda ph, v: feed_dict.__setitem__(ph, v),
-                placeholders,
-                train_batch[key],
-            )
+            if key in train_batch:
+                tree.map_structure(
+                    lambda ph, v: feed_dict.__setitem__(ph, v),
+                    placeholders,
+                    train_batch[key],
+                )
 
         state_keys = [
             "state_in_{}".format(i) for i in range(len(self._state_inputs))
         ]
         for key in state_keys:
-            feed_dict[self._loss_input_dict[key]] = train_batch[key]
+            if key in train_batch:
+                feed_dict[self._loss_input_dict[key]] = train_batch[key]
         if state_keys:
             feed_dict[self._seq_lens] = train_batch[SampleBatch.SEQ_LENS]
 

@@ -1,11 +1,14 @@
+import enum
 import logging
+from random import sample
 import gym
 from typing import Optional, Dict
+from pydantic import EnumMemberError
 
 import ray
 from ray.rllib.agents.ppo.ppo_tf_policy import compute_and_clip_gradients
 from ray.rllib.policy.sample_batch import SampleBatch
-from ray.rllib.evaluation.postprocessing import compute_advantages, \
+from ray.rllib.evaluation.postprocessing import adjust_nstep, compute_advantages, \
     Postprocessing
 from ray.rllib.policy.tf_policy_template import build_tf_policy
 from ray.rllib.utils.framework import try_import_tf, get_variable
@@ -36,6 +39,17 @@ class ValueNetworkMixin:
 
         self._value = value
 
+def add_rnn_states(policy: Policy, sample_batch: SampleBatch):
+    for i, state_in in enumerate(policy._state_inputs):
+        sample_batch[f"state_in_{i}"] = state_in
+    # for i, state_out in enumerate(policy._state_out):
+    #     sample_batch[f"state_out_{i}"] = state_out
+
+    print('state input',policy._state_inputs)
+
+    
+    return sample_batch
+    
 
 def postprocess_advantages(
         policy: Policy,
@@ -65,7 +79,6 @@ def postprocess_advantages(
     Returns:
         SampleBatch: The postprocessed, modified SampleBatch (or a new one).
     """
-
     # Trajectory is actually complete -> last r=0.0.
     if sample_batch[SampleBatch.DONES][-1]:
         last_r = 0.0
@@ -82,7 +95,7 @@ def postprocess_advantages(
 
     # Adds the "advantages" (which in the case of MARWIL are simply the
     # discounted cummulative rewards) to the SampleBatch.
-    return compute_advantages(
+    sample_batch = compute_advantages(
         sample_batch,
         last_r,
         policy.config["gamma"],
@@ -91,7 +104,14 @@ def postprocess_advantages(
         use_gae=False,
         use_critic=False)
 
+    # print('sample_batch beforr',sample_batch)
+    
+    # sample_batch = add_rnn_states(policy, sample_batch)
+    # print('sample_batch after',sample_batch)
 
+    # print('sample_batch state in',sample_batch['state_in_0'])
+    # sample_batch = adjust_nstep(n_step=policy.config["replay_sequence_length"], gamma=policy.config["gamma"], batch=sample_batch)
+    return sample_batch
 class MARWILLoss:
     def __init__(self, policy: Policy, value_estimates: TensorType,
                  action_dist: ActionDistribution, train_batch: SampleBatch,
