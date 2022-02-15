@@ -280,7 +280,7 @@ class TFPolicy(Policy):
             episodes: Optional[List["Episode"]] = None,
             **kwargs) -> \
             Tuple[TensorType, List[TensorType], Dict[str, TensorType]]:
-
+        print('in compute_actions_from_input_dict')
         explore = explore if explore is not None else self.config["explore"]
         timestep = timestep if timestep is not None else self.global_timestep
 
@@ -966,7 +966,8 @@ class TFPolicy(Policy):
                                timestep=None):
         explore = explore if explore is not None else self.config["explore"]
         timestep = timestep if timestep is not None else self.global_timestep
-
+        print("_build_compute_actions",input_dict.keys())
+        print("_build_compute_actions state_batches",state_batches)
         # Call the exploration before_compute_actions hook.
         self.exploration.before_compute_actions(
             timestep=timestep, explore=explore, tf_sess=self.get_session())

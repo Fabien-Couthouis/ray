@@ -56,22 +56,47 @@ class RecurrentNetwork(TFModelV2):
                 outputs=[output_layer, state_h, state_c])
             self.rnn_model.summary()
     """
-
     @override(ModelV2)
-    def forward(self, input_dict: Dict[str, TensorType],
-                state: List[TensorType],
-                seq_lens: TensorType) -> (TensorType, List[TensorType]):
-        """Adds time dimension to batch before sending inputs to forward_rnn().
-
-        You should implement forward_rnn() in your subclass."""
-        assert seq_lens is not None
+    def forward(self, input_dict, state, seq_lens):
+        # Split real observations and action mask tensors from the observation.
         padded_inputs = input_dict["obs_flat"]
-        max_seq_len = tf.shape(padded_inputs)[0] // tf.shape(seq_lens)[0]
-        output, new_state = self.forward_rnn(
-            add_time_dimension(
-                padded_inputs, max_seq_len=max_seq_len, framework="tf"), state,
-            seq_lens)
-        return tf.reshape(output, [-1, self.num_outputs]), new_state
+
+        # Compute the predicted action embedding
+        n_seq = tf.shape(seq_lens)[0]
+        print("FW seq_lens",tf.shape(seq_lens),seq_lens)
+        print("FW seq_lens min/max",tf.math.reduce_min(seq_lens),tf.math.reduce_max(seq_lens))
+        print("FW n_seq",n_seq)
+        print("FW tf.shape(padded_inputs)",tf.shape(padded_inputs))
+        max_seq_len = tf.shape(padded_inputs)[0] // n_seq
+        inputs = add_time_dimension(padded_inputs, max_seq_len=max_seq_len)
+        action_logits, self._value_out, h, c = self.rnn_model(
+            [inputs, seq_lens] + state
+        )
+        action_logits = tf.reshape(action_logits, [-1, self.num_outputs])
+
+
+        return action_logits, [h, c]
+
+
+    # @override(ModelV2)
+    # def forward(self, input_dict: Dict[str, TensorType],
+    #             state: List[TensorType],
+    #             seq_lens: TensorType) -> (TensorType, List[TensorType]):
+    #     """Adds time dimension to batch before sending inputs to forward_rnn().
+
+    #     You should implement forward_rnn() in your subclass."""
+    #     assert seq_lens is not None
+    #     padded_inputs = input_dict["obs_flat"]
+    #     print(' tf.shape(seq_lens)[0]', tf.shape(seq_lens)[0])
+    #     print("tf.shape(padded_inputs)[0]",tf.shape(padded_inputs)[0])
+    #     max_seq_len = tf.shape(padded_inputs)[0] // tf.shape(seq_lens)[0]
+    #     print('max_seq_len forward',max_seq_len)
+
+    #     output, new_state = self.forward_rnn(
+    #         add_time_dimension(
+    #             padded_inputs, max_seq_len=max_seq_len, framework="tf"), state,
+    #         seq_lens)
+    #     return tf.reshape(output, [-1, self.num_outputs]), new_state
 
     def forward_rnn(self, inputs: TensorType, state: List[TensorType],
                     seq_lens: TensorType) -> (TensorType, List[TensorType]):

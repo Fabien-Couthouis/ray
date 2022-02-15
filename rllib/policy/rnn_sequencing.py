@@ -172,6 +172,7 @@ def add_time_dimension(padded_inputs: TensorType,
     # input batch must be padded to the max seq length given here. That is,
     # batch_size == len(seq_lens) * max(seq_lens)
     if framework in ["tf2", "tf", "tfe"]:
+        print("max_seq_len add time dim",max_seq_len)
         assert time_major is False, "time-major not supported yet for tf!"
         padded_batch_size = tf.shape(padded_inputs)[0]
         # Dynamically reshape the padded batch to introduce a time dimension.
@@ -184,6 +185,8 @@ def add_time_dimension(padded_inputs: TensorType,
                     tf.shape(padded_inputs)[1:]
                 ],
                 axis=0))
+        print('old',padded_inputs.shape)
+        print('new_shape',new_shape)
         return tf.reshape(padded_inputs, new_shape)
     else:
         assert framework == "torch", "`framework` must be either tf or torch!"

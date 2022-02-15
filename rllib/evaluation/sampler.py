@@ -1078,7 +1078,7 @@ def _do_policy_eval(
                 input_dict,
                 timestep=policy.global_timestep,
                 episodes=[active_episodes[t.env_id] for t in eval_data])
-
+        print('res',eval_results[policy_id])
     if log_once("compute_actions_result"):
         logger.info("Outputs of compute_actions():\n\n{}\n".format(
             summarize(eval_results)))
