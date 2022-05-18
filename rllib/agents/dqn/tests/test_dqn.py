@@ -122,8 +122,15 @@ class TestDQN(unittest.TestCase):
             trainer.stop()
 
 
+# if __name__ == "__main__":
+#     import pytest
+#     import sys
+
+#     sys.exit(pytest.main(["-v", __file__]))
+
 if __name__ == "__main__":
     import pytest
     import sys
 
-    sys.exit(pytest.main(["-v", __file__]))
+    # sys.exit(pytest.main(["-r","f", __file__]))
+    TestDQN("test_dqn_compilation").test_dqn_compilation()
